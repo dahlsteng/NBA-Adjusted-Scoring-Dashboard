@@ -171,7 +171,7 @@ input[type=range] { width: 140px; padding: 4px; }
 .callout-detail { font-size: 0.85rem; color: var(--text2); }
 .callout-num { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
 
-/* ========== COMBINED TABLE + FUNNEL PANEL ========== */
+/* ========== TABLE + FUNNEL ========== */
 .table-funnel-wrap {
   display: flex;
   gap: 0;
@@ -238,9 +238,6 @@ input[type=range] { width: 140px; padding: 4px; }
   background: var(--surface2);
   border-bottom: 1px solid var(--border);
   text-align: center;
-  position: sticky;
-  top: 0;
-  z-index: 2;
   height: 37px;
   display: flex;
   align-items: center;
@@ -250,28 +247,6 @@ input[type=range] { width: 140px; padding: 4px; }
   flex: 1;
   position: relative;
   overflow: hidden;
-}
-.funnel-canvas-wrap {
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-}
-.funnel-canvas-wrap canvas {
-  display: block;
-}
-
-/* Axis labels */
-.funnel-axis {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 20px;
-  display: flex;
-  justify-content: space-between;
-  padding: 0 8px;
-  font-size: 0.6rem;
-  color: var(--text3);
-  font-family: 'JetBrains Mono', monospace;
 }
 
 .badge {
@@ -373,11 +348,9 @@ input[type=range] { width: 140px; padding: 4px; }
     <button class="tab" data-tab="trends">Era Trends</button>
   </div>
 
-  <!-- OVERVIEW TAB: always-on table + funnel -->
   <div id="tab-overview">
     <div class="callout-grid" id="callouts"></div>
-
-    <div class="table-funnel-wrap" id="tableFunnelWrap">
+    <div class="table-funnel-wrap">
       <div class="table-side" id="tableScrollArea">
         <table>
           <thead>
@@ -385,6 +358,7 @@ input[type=range] { width: 140px; padding: 4px; }
               <th data-col="sr" class="sorted">Rank</th>
               <th data-col="n">Player</th>
               <th data-col="t">Team</th>
+              <th data-col="sl">Season</th>
               <th data-col="tw">2PM</th>
               <th data-col="th">3PM</th>
               <th data-col="ft">FTM</th>
@@ -404,17 +378,16 @@ input[type=range] { width: 140px; padding: 4px; }
       </div>
     </div>
     <div class="pagination">
-      <button id="prevPage">← Prev</button>
+      <button id="prevPage">&larr; Prev</button>
       <span class="page-info" id="pageInfo"></span>
-      <button id="nextPage">Next →</button>
+      <button id="nextPage">Next &rarr;</button>
     </div>
   </div>
 
-  <!-- CHARTS TAB -->
   <div id="tab-charts" class="hidden">
     <div class="grid">
       <div class="card">
-        <div class="card-title">Standard vs Adjusted PPG — Top 20 Scorers</div>
+        <div class="card-title">Standard vs Adjusted PPG &mdash; Top 20 Scorers</div>
         <div class="chart-container"><canvas id="barChart"></canvas></div>
       </div>
       <div class="card">
@@ -422,13 +395,12 @@ input[type=range] { width: 140px; padding: 4px; }
         <div class="chart-container"><canvas id="scatterChart"></canvas></div>
       </div>
       <div class="card grid-full">
-        <div class="card-title">% Change (Std → Adj) vs Standard PPG</div>
+        <div class="card-title">% Change (Std &rarr; Adj) vs Standard PPG</div>
         <div class="chart-container"><canvas id="pctScatterChart"></canvas></div>
       </div>
     </div>
   </div>
 
-  <!-- TRENDS TAB -->
   <div id="tab-trends" class="hidden">
     <div class="grid">
       <div class="card grid-full">
@@ -458,59 +430,89 @@ const C = {
 };
 
 let state = {
-  season:2024, minPPG:10, minGP:20, minMPG:10,
-  tab:'overview', sortCol:'sr', sortDir:'asc',
+  season: 'all',  // default to all-time
+  minPPG:10, minGP:20, minMPG:10,
+  tab:'overview', sortCol:'sp', sortDir:'desc',
   page:0, pageSize:25,
 };
 let charts = {};
+let currentPageData = [];
 
-// ========== SETUP ==========
+// ========== SETUP SEASONS ==========
 const seasons = [...new Set(PLAYERS.map(p=>p.s))].sort((a,b)=>b-a);
 const sel = document.getElementById('seasonSelect');
+// Add "All Time" as the first option
+const allOpt = document.createElement('option');
+allOpt.value = 'all';
+allOpt.text = 'All Time';
+allOpt.selected = true;
+sel.appendChild(allOpt);
+// Then individual seasons
 seasons.forEach(s => {
   const o = document.createElement('option');
-  o.value=s; o.text=s+'-'+String(s+1).slice(-2);
-  if(s===2024) o.selected=true;
+  o.value = s;
+  o.text = s + '-' + String(s+1).slice(-2);
   sel.appendChild(o);
 });
 
-function getFiltered() {
-  return PLAYERS.filter(p => p.s===state.season && p.sp>=state.minPPG && p.gp>=state.minGP && p.mn>=state.minMPG);
-}
+// ========== DATA ==========
 function pctOf(p) { return p.sp ? ((p.d/p.sp)*100) : 0; }
+
+function getFiltered() {
+  let data = PLAYERS;
+  if (state.season !== 'all') {
+    data = data.filter(p => p.s === state.season);
+  }
+  data = data.filter(p => p.sp >= state.minPPG && p.gp >= state.minGP && p.mn >= state.minMPG);
+
+  // For all-time, we need to re-rank across all seasons
+  if (state.season === 'all') {
+    const sorted = [...data].sort((a,b) => b.sp - a.sp);
+    sorted.forEach((p, i) => { p._allRank = i + 1; });
+    const sortedAdj = [...data].sort((a,b) => b.ap - a.ap);
+    sortedAdj.forEach((p, i) => { p._allAdjRank = i + 1; });
+    data.forEach(p => { p._allRankChg = (p._allRank || 0) - (p._allAdjRank || 0); });
+  }
+  return data;
+}
+
+function getRank(p) { return state.season === 'all' ? (p._allRank || 0) : p.sr; }
+function getAdjRank(p) { return state.season === 'all' ? (p._allAdjRank || 0) : p.ar; }
+function getRankChg(p) { return state.season === 'all' ? (p._allRankChg || 0) : p.rc; }
+
 function getSorted(data) {
-  const col=state.sortCol, dir=state.sortDir==='asc'?1:-1;
-  return [...data].sort((a,b)=>{
-    let av,bv;
-    if(col==='dp'){av=pctOf(a);bv=pctOf(b);}
-    else{av=typeof a[col]==='string'?a[col].toLowerCase():a[col];bv=typeof b[col]==='string'?b[col].toLowerCase():b[col];}
-    return av<bv?-1*dir:av>bv?1*dir:0;
+  const col = state.sortCol, dir = state.sortDir === 'asc' ? 1 : -1;
+  return [...data].sort((a, b) => {
+    let av, bv;
+    if (col === 'dp') { av = pctOf(a); bv = pctOf(b); }
+    else if (col === 'sr') { av = getRank(a); bv = getRank(b); }
+    else { av = typeof a[col] === 'string' ? a[col].toLowerCase() : a[col]; bv = typeof b[col] === 'string' ? b[col].toLowerCase() : b[col]; }
+    return av < bv ? -1*dir : av > bv ? 1*dir : 0;
   });
 }
 
 // ========== CALLOUTS ==========
 function renderCallouts(data) {
-  const el=document.getElementById('callouts');
-  if(!data.length){el.innerHTML='<p style="color:var(--text3)">No players match.</p>';return;}
-  const bigDrop=[...data].sort((a,b)=>a.d-b.d)[0];
-  const smlDrop=[...data].sort((a,b)=>b.d-a.d)[0];
-  const bigRise=[...data].sort((a,b)=>b.rc-a.rc)[0];
-  const bigFall=[...data].sort((a,b)=>a.rc-b.rc)[0];
-  const bigPct=[...data].sort((a,b)=>pctOf(a)-pctOf(b))[0];
-  const smlPct=[...data].sort((a,b)=>pctOf(b)-pctOf(a))[0];
-  const pf=p=>pctOf(p).toFixed(1);
-  el.innerHTML=
-    '<div class="callout red"><div class="callout-label">Biggest PPG Drop</div><div class="callout-name">'+bigDrop.n+'</div><div class="callout-detail">'+bigDrop.t+' · <span class="callout-num">'+bigDrop.sp+' → '+bigDrop.ap+'</span> ('+bigDrop.d+' / '+pf(bigDrop)+'%)</div></div>'+
-    '<div class="callout green"><div class="callout-label">Smallest PPG Drop</div><div class="callout-name">'+smlDrop.n+'</div><div class="callout-detail">'+smlDrop.t+' · <span class="callout-num">'+smlDrop.sp+' → '+smlDrop.ap+'</span> ('+smlDrop.d+' / '+pf(smlDrop)+'%)</div></div>'+
-    '<div class="callout purple"><div class="callout-label">Largest % Drop</div><div class="callout-name">'+bigPct.n+'</div><div class="callout-detail">'+bigPct.t+' · <span class="callout-num">'+pf(bigPct)+'%</span> ('+bigPct.sp+' → '+bigPct.ap+')</div></div>'+
-    '<div class="callout green"><div class="callout-label">Smallest % Drop</div><div class="callout-name">'+smlPct.n+'</div><div class="callout-detail">'+smlPct.t+' · <span class="callout-num">'+pf(smlPct)+'%</span> ('+smlPct.sp+' → '+smlPct.ap+')</div></div>'+
-    '<div class="callout green"><div class="callout-label">Biggest Rank Riser</div><div class="callout-name">'+bigRise.n+'</div><div class="callout-detail">'+bigRise.t+' · #'+bigRise.sr+' → #'+bigRise.ar+' <span class="callout-num">(+'+bigRise.rc+')</span></div></div>'+
-    '<div class="callout red"><div class="callout-label">Biggest Rank Faller</div><div class="callout-name">'+bigFall.n+'</div><div class="callout-detail">'+bigFall.t+' · #'+bigFall.sr+' → #'+bigFall.ar+' <span class="callout-num">('+bigFall.rc+')</span></div></div>';
+  const el = document.getElementById('callouts');
+  if (!data.length) { el.innerHTML = '<p style="color:var(--text3)">No players match.</p>'; return; }
+  const bigDrop = [...data].sort((a,b) => a.d - b.d)[0];
+  const smlDrop = [...data].sort((a,b) => b.d - a.d)[0];
+  const bigPct = [...data].sort((a,b) => pctOf(a) - pctOf(b))[0];
+  const smlPct = [...data].sort((a,b) => pctOf(b) - pctOf(a))[0];
+  const bigRise = [...data].sort((a,b) => getRankChg(b) - getRankChg(a))[0];
+  const bigFall = [...data].sort((a,b) => getRankChg(a) - getRankChg(b))[0];
+  const pf = p => pctOf(p).toFixed(1);
+  const slbl = p => state.season === 'all' ? ' · ' + p.sl : '';
+  el.innerHTML =
+    '<div class="callout red"><div class="callout-label">Biggest PPG Drop</div><div class="callout-name">' + bigDrop.n + '</div><div class="callout-detail">' + bigDrop.t + slbl(bigDrop) + ' · <span class="callout-num">' + bigDrop.sp + ' &rarr; ' + bigDrop.ap + '</span> (' + bigDrop.d + ' / ' + pf(bigDrop) + '%)</div></div>' +
+    '<div class="callout green"><div class="callout-label">Smallest PPG Drop</div><div class="callout-name">' + smlDrop.n + '</div><div class="callout-detail">' + smlDrop.t + slbl(smlDrop) + ' · <span class="callout-num">' + smlDrop.sp + ' &rarr; ' + smlDrop.ap + '</span> (' + smlDrop.d + ' / ' + pf(smlDrop) + '%)</div></div>' +
+    '<div class="callout purple"><div class="callout-label">Largest % Drop</div><div class="callout-name">' + bigPct.n + '</div><div class="callout-detail">' + bigPct.t + slbl(bigPct) + ' · <span class="callout-num">' + pf(bigPct) + '%</span> (' + bigPct.sp + ' &rarr; ' + bigPct.ap + ')</div></div>' +
+    '<div class="callout green"><div class="callout-label">Smallest % Drop</div><div class="callout-name">' + smlPct.n + '</div><div class="callout-detail">' + smlPct.t + slbl(smlPct) + ' · <span class="callout-num">' + pf(smlPct) + '%</span> (' + smlPct.sp + ' &rarr; ' + smlPct.ap + ')</div></div>' +
+    '<div class="callout green"><div class="callout-label">Biggest Rank Riser</div><div class="callout-name">' + bigRise.n + '</div><div class="callout-detail">' + bigRise.t + slbl(bigRise) + ' · #' + getRank(bigRise) + ' &rarr; #' + getAdjRank(bigRise) + ' <span class="callout-num">(+' + getRankChg(bigRise) + ')</span></div></div>' +
+    '<div class="callout red"><div class="callout-label">Biggest Rank Faller</div><div class="callout-name">' + bigFall.n + '</div><div class="callout-detail">' + bigFall.t + slbl(bigFall) + ' · #' + getRank(bigFall) + ' &rarr; #' + getAdjRank(bigFall) + ' <span class="callout-num">(' + getRankChg(bigFall) + ')</span></div></div>';
 }
 
 // ========== TABLE + FUNNEL ==========
-let currentPageData = [];
-
 function renderTableAndFunnel(data) {
   const sorted = getSorted(data);
   const start = state.page * state.pageSize;
@@ -518,51 +520,53 @@ function renderTableAndFunnel(data) {
   const totalPages = Math.ceil(sorted.length / state.pageSize);
   currentPageData = page;
 
-  // Table
+  const showSeason = state.season === 'all';
+  // Show/hide season column
+  const seasonTh = document.querySelector('th[data-col="sl"]');
+  if (seasonTh) seasonTh.style.display = showSeason ? '' : 'none';
+
   const tbody = document.getElementById('mainTBody');
   tbody.innerHTML = page.map(p => {
     const pc = pctOf(p).toFixed(1);
-    return '<tr data-player="'+p.n+'">' +
-      '<td style="font-family:JetBrains Mono,monospace;color:'+C.text3+'">'+p.sr+'</td>' +
-      '<td style="font-weight:600">'+p.n+'</td>' +
-      '<td style="color:'+C.text3+';font-size:0.75rem">'+p.t+'</td>' +
-      '<td>'+p.tw+'</td>' +
-      '<td>'+p.th+'</td>' +
-      '<td>'+p.ft+'</td>' +
-      '<td>'+p.sp+'</td>' +
-      '<td style="color:'+C.accent+'">'+p.ap+'</td>' +
-      '<td><span class="badge '+(parseFloat(pc)>=-8?'badge-green':'badge-red')+'">'+pc+'%</span></td>' +
+    const rank = getRank(p);
+    return '<tr>' +
+      '<td style="font-family:JetBrains Mono,monospace;color:' + C.text3 + '">' + rank + '</td>' +
+      '<td style="font-weight:600">' + p.n + '</td>' +
+      '<td style="color:' + C.text3 + ';font-size:0.75rem">' + p.t + '</td>' +
+      (showSeason ? '<td style="color:' + C.text3 + ';font-size:0.75rem">' + p.sl + '</td>' : '') +
+      '<td>' + p.tw + '</td>' +
+      '<td>' + p.th + '</td>' +
+      '<td>' + p.ft + '</td>' +
+      '<td>' + p.sp + '</td>' +
+      '<td style="color:' + C.accent + '">' + p.ap + '</td>' +
+      '<td><span class="badge ' + (parseFloat(pc) >= -8 ? 'badge-green' : 'badge-red') + '">' + pc + '%</span></td>' +
       '</tr>';
   }).join('');
 
-  document.getElementById('pageInfo').textContent='Page '+(state.page+1)+' of '+totalPages+' ('+sorted.length+')';
-  document.getElementById('prevPage').disabled=state.page===0;
-  document.getElementById('nextPage').disabled=state.page>=totalPages-1;
+  document.getElementById('pageInfo').textContent = 'Page ' + (state.page+1) + ' of ' + totalPages + ' (' + sorted.length + ' player-seasons)';
+  document.getElementById('prevPage').disabled = state.page === 0;
+  document.getElementById('nextPage').disabled = state.page >= totalPages - 1;
 
-  // Sync hover
+  // Hover sync
   const rows = tbody.querySelectorAll('tr');
   rows.forEach((tr, i) => {
     tr.addEventListener('mouseenter', () => highlightFunnelRow(i, true));
     tr.addEventListener('mouseleave', () => highlightFunnelRow(i, false));
   });
 
-  renderFunnel(page);
+  // Small delay to let DOM render row heights
+  requestAnimationFrame(() => renderFunnel(page));
 }
 
-// ========== FUNNEL (horizontal bar chart aligned to table rows) ==========
 let funnelHoverIdx = -1;
 
 function renderFunnel(pageData) {
   const canvas = document.getElementById('funnelCanvas');
   const container = document.getElementById('funnelBody');
   const tableArea = document.getElementById('tableScrollArea');
-
-  // Match canvas size to table body height
-  // We need the header height from the table
   const thead = tableArea.querySelector('thead');
   const theadH = thead ? thead.offsetHeight : 37;
-  const rowCount = pageData.length;
-  // Get actual row heights from rendered table
+
   const rows = document.getElementById('mainTBody').querySelectorAll('tr');
   let totalRowH = 0;
   const rowHeights = [];
@@ -570,7 +574,7 @@ function renderFunnel(pageData) {
 
   const dpr = window.devicePixelRatio || 1;
   const W = container.clientWidth;
-  const H = totalRowH || rowCount * 32;
+  const H = totalRowH || pageData.length * 32;
 
   canvas.width = W * dpr;
   canvas.height = H * dpr;
@@ -581,57 +585,41 @@ function renderFunnel(pageData) {
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, W, H);
-
   if (!pageData.length) return;
 
-  // Determine axis range
   const pcts = pageData.map(p => pctOf(p));
   const minPct = Math.floor(Math.min(...pcts) - 1);
   const maxPct = Math.ceil(Math.max(...pcts) + 1);
   const range = maxPct - minPct || 1;
 
-  // Draw axis gridlines
   const axisSteps = [];
   for (let v = Math.ceil(minPct); v <= Math.floor(maxPct); v += 2) axisSteps.push(v);
-  if (axisSteps.length < 2) { for (let v = Math.ceil(minPct); v <= Math.floor(maxPct); v++) axisSteps.push(v); }
+  if (axisSteps.length < 2) for (let v = Math.ceil(minPct); v <= Math.floor(maxPct); v++) axisSteps.push(v);
 
-  const padL = 4;
-  const padR = 4;
+  const padL = 4, padR = 4;
   const barArea = W - padL - padR;
 
   ctx.strokeStyle = '#252b3b';
   ctx.lineWidth = 0.5;
   ctx.font = '9px JetBrains Mono, monospace';
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#64748b';
 
   axisSteps.forEach(v => {
     const x = padL + ((v - minPct) / range) * barArea;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, H);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
   });
-
-  // Draw tick labels at bottom
   axisSteps.forEach(v => {
     const x = padL + ((v - minPct) / range) * barArea;
     ctx.fillStyle = '#64748b';
     ctx.fillText(v + '%', x, H - 2);
   });
 
-  // Draw 0% line if in range
   if (minPct <= 0 && maxPct >= 0) {
     const zx = padL + ((0 - minPct) / range) * barArea;
-    ctx.strokeStyle = '#475569';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(zx, 0);
-    ctx.lineTo(zx, H - 14);
-    ctx.stroke();
+    ctx.strokeStyle = '#475569'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(zx, 0); ctx.lineTo(zx, H - 14); ctx.stroke();
   }
 
-  // Draw bars
   let yOff = 0;
   pageData.forEach((p, i) => {
     const rh = rowHeights[i] || 32;
@@ -640,14 +628,13 @@ function renderFunnel(pageData) {
     const barH = rh - 4;
     const y = yOff + 2;
 
-    // Gradient color based on severity
     const severity = Math.min(Math.abs(pct) / 14, 1);
     const r = Math.round(239 * severity + 16 * (1 - severity));
     const g = Math.round(68 * severity + 185 * (1 - severity));
     const b = Math.round(68 * severity + 129 * (1 - severity));
     const alpha = funnelHoverIdx === i ? 1.0 : 0.65;
 
-    ctx.fillStyle = 'rgba('+r+','+g+','+b+','+alpha+')';
+    ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
     ctx.beginPath();
     ctx.roundRect(padL, y, barW, barH, 3);
     ctx.fill();
@@ -659,113 +646,116 @@ function renderFunnel(pageData) {
 function highlightFunnelRow(idx, on) {
   funnelHoverIdx = on ? idx : -1;
   renderFunnel(currentPageData);
-  // Also highlight table row
   const rows = document.getElementById('mainTBody').querySelectorAll('tr');
-  rows.forEach((r,i) => r.classList.toggle('row-active', on && i===idx));
+  rows.forEach((r, i) => r.classList.toggle('row-active', on && i === idx));
 }
 
-// Sync scroll: table scroll should NOT affect funnel since funnel is sized to match
 const tableScrollArea = document.getElementById('tableScrollArea');
 tableScrollArea.addEventListener('scroll', () => {
   const canvas = document.getElementById('funnelCanvas');
   canvas.style.marginTop = (document.querySelector('.table-side thead').offsetHeight - tableScrollArea.scrollTop) + 'px';
 });
 
-// ========== CHARTS TAB ==========
+// ========== CHARTS ==========
 function renderCharts(data) {
-  const top20=[...data].sort((a,b)=>b.sp-a.sp).slice(0,20);
-  if(charts.bar) charts.bar.destroy();
-  charts.bar = new Chart(document.getElementById('barChart'),{
-    type:'bar',
-    data:{labels:top20.map(p=>p.n.split(' ').pop()),datasets:[
-      {label:'Standard PPG',data:top20.map(p=>p.sp),backgroundColor:C.accent2+'99',borderColor:C.accent2,borderWidth:1},
-      {label:'Adjusted PPG',data:top20.map(p=>p.ap),backgroundColor:C.accent+'99',borderColor:C.accent,borderWidth:1}
-    ]},
-    options:{responsive:true,plugins:{legend:{labels:{color:C.text2}},tooltip:{callbacks:{title:items=>top20[items[0].dataIndex]?.n||''}}},
-      scales:{x:{ticks:{color:C.text3,font:{size:10}},grid:{color:C.border}},y:{ticks:{color:C.text3},grid:{color:C.border},beginAtZero:false,suggestedMin:10}}}
+  // For all-time, just use top 20 by std ppg
+  const top20 = [...data].sort((a,b) => b.sp - a.sp).slice(0, 20);
+  if (charts.bar) charts.bar.destroy();
+  charts.bar = new Chart(document.getElementById('barChart'), {
+    type: 'bar',
+    data: { labels: top20.map(p => p.n.split(' ').pop() + (state.season === 'all' ? ' ' + p.sl : '')),
+      datasets: [
+        { label: 'Standard PPG', data: top20.map(p => p.sp), backgroundColor: C.accent2 + '99', borderColor: C.accent2, borderWidth: 1 },
+        { label: 'Adjusted PPG', data: top20.map(p => p.ap), backgroundColor: C.accent + '99', borderColor: C.accent, borderWidth: 1 }
+      ]},
+    options: { responsive: true, plugins: { legend: { labels: { color: C.text2 } }, tooltip: { callbacks: { title: items => { const p = top20[items[0].dataIndex]; return p.n + (state.season === 'all' ? ' (' + p.sl + ')' : ''); } } } },
+      scales: { x: { ticks: { color: C.text3, font: { size: 9 } }, grid: { color: C.border } }, y: { ticks: { color: C.text3 }, grid: { color: C.border }, beginAtZero: false, suggestedMin: 10 } } }
   });
 
-  if(charts.scatter) charts.scatter.destroy();
-  const spts=data.map(p=>({x:p.th>0?Math.round((p.th/(p.tw+p.th))*1000)/10:0,y:p.d,name:p.n,team:p.t}));
-  charts.scatter = new Chart(document.getElementById('scatterChart'),{
-    type:'scatter',
-    data:{datasets:[{data:spts,backgroundColor:spts.map(p=>{const v=Math.min(Math.abs(p.y)/4,1);return'rgba(249,115,22,'+(0.3+v*0.7)+')';}),pointRadius:5,pointHoverRadius:8}]},
-    options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>{const p=ctx.raw;return p.name+' ('+p.team+'): 3PT%='+p.x+'%, Δ='+p.y;}}}},
-      scales:{x:{title:{display:true,text:'3PT share of FGM (%)',color:C.text3},ticks:{color:C.text3},grid:{color:C.border}},y:{title:{display:true,text:'PPG Change',color:C.text3},ticks:{color:C.text3},grid:{color:C.border}}}}
+  if (charts.scatter) charts.scatter.destroy();
+  const spts = data.map(p => ({ x: p.th > 0 ? Math.round((p.th / (p.tw + p.th)) * 1000) / 10 : 0, y: p.d, name: p.n, team: p.t, sl: p.sl }));
+  charts.scatter = new Chart(document.getElementById('scatterChart'), {
+    type: 'scatter',
+    data: { datasets: [{ data: spts, backgroundColor: spts.map(p => { const v = Math.min(Math.abs(p.y) / 4, 1); return 'rgba(249,115,22,' + (0.3 + v * 0.7) + ')'; }), pointRadius: 5, pointHoverRadius: 8 }] },
+    options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => { const p = ctx.raw; return p.name + ' (' + p.team + '): 3PT%=' + p.x + '%, Δ=' + p.y; } } } },
+      scales: { x: { title: { display: true, text: '3PT share of FGM (%)', color: C.text3 }, ticks: { color: C.text3 }, grid: { color: C.border } }, y: { title: { display: true, text: 'PPG Change', color: C.text3 }, ticks: { color: C.text3 }, grid: { color: C.border } } } }
   });
 
-  if(charts.pctScatter) charts.pctScatter.destroy();
-  const ppts=data.map(p=>({x:p.sp,y:pctOf(p).toFixed(1)*1,name:p.n,team:p.t,d:p.d}));
-  charts.pctScatter = new Chart(document.getElementById('pctScatterChart'),{
-    type:'scatter',
-    data:{datasets:[{data:ppts,backgroundColor:ppts.map(p=>{const s=Math.min(Math.abs(p.y)/14,1);return'rgba('+Math.round(239*s+6*(1-s))+','+Math.round(68*s+182*(1-s))+','+Math.round(68*s+212*(1-s))+',0.7)';}),pointRadius:5,pointHoverRadius:8}]},
-    options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>{const p=ctx.raw;return p.name+' ('+p.team+'): '+p.x+' PPG → '+p.y+'%';}}}},
-      scales:{x:{title:{display:true,text:'Standard PPG',color:C.text3},ticks:{color:C.text3},grid:{color:C.border}},y:{title:{display:true,text:'% Change',color:C.text3},ticks:{color:C.text3,callback:v=>v+'%'},grid:{color:C.border}}}}
+  if (charts.pctScatter) charts.pctScatter.destroy();
+  const ppts = data.map(p => ({ x: p.sp, y: Math.round(pctOf(p) * 10) / 10, name: p.n, team: p.t, d: p.d, sl: p.sl }));
+  charts.pctScatter = new Chart(document.getElementById('pctScatterChart'), {
+    type: 'scatter',
+    data: { datasets: [{ data: ppts, backgroundColor: ppts.map(p => { const s = Math.min(Math.abs(p.y) / 14, 1); return 'rgba(' + Math.round(239 * s + 6 * (1 - s)) + ',' + Math.round(68 * s + 182 * (1 - s)) + ',' + Math.round(68 * s + 212 * (1 - s)) + ',0.7)'; }), pointRadius: 5, pointHoverRadius: 8 }] },
+    options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => { const p = ctx.raw; return p.name + ' (' + p.team + '): ' + p.x + ' PPG → ' + p.y + '%'; } } } },
+      scales: { x: { title: { display: true, text: 'Standard PPG', color: C.text3 }, ticks: { color: C.text3 }, grid: { color: C.border } }, y: { title: { display: true, text: '% Change', color: C.text3 }, ticks: { color: C.text3, callback: v => v + '%' }, grid: { color: C.border } } } }
   });
 }
 
 // ========== TRENDS ==========
 function renderTrends() {
-  const labels=ERA.map(e=>e.label);
-  if(charts.trendDiff) charts.trendDiff.destroy();
-  charts.trendDiff=new Chart(document.getElementById('trendDiff'),{type:'line',data:{labels,datasets:[
-    {label:'Avg PPG Drop',data:ERA.map(e=>e.avg_diff),borderColor:C.red,backgroundColor:C.red+'22',fill:true,tension:0.3,pointRadius:2},
-    {label:'Avg Diff %',data:ERA.map(e=>e.avg_diff_pct),borderColor:C.accent,borderDash:[5,5],tension:0.3,pointRadius:2,yAxisID:'pct'}
-  ]},options:{responsive:true,interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:C.text2}}},scales:{
-    x:{ticks:{color:C.text3,maxRotation:45,maxTicksLimit:20},grid:{color:C.border}},
-    y:{position:'left',title:{display:true,text:'PPG Drop',color:C.text3},ticks:{color:C.text3},grid:{color:C.border}},
-    pct:{position:'right',title:{display:true,text:'Diff %',color:C.text3},ticks:{color:C.text3},grid:{display:false}}
-  }}});
-  if(charts.trend3) charts.trend3.destroy();
-  charts.trend3=new Chart(document.getElementById('trend3pm'),{type:'line',data:{labels,datasets:[{label:'Avg 3PM/G',data:ERA.map(e=>e.avg_3pm),borderColor:C.accent,backgroundColor:C.accent+'22',fill:true,tension:0.3,pointRadius:2}]},
-    options:{responsive:true,plugins:{legend:{labels:{color:C.text2}}},scales:{x:{ticks:{color:C.text3,maxRotation:45,maxTicksLimit:15},grid:{color:C.border}},y:{ticks:{color:C.text3},grid:{color:C.border}}}}});
-  if(charts.trendFt) charts.trendFt.destroy();
-  charts.trendFt=new Chart(document.getElementById('trendFtm'),{type:'line',data:{labels,datasets:[{label:'Avg FTM/G',data:ERA.map(e=>e.avg_ftm),borderColor:C.purple,backgroundColor:C.purple+'22',fill:true,tension:0.3,pointRadius:2}]},
-    options:{responsive:true,plugins:{legend:{labels:{color:C.text2}}},scales:{x:{ticks:{color:C.text3,maxRotation:45,maxTicksLimit:15},grid:{color:C.border}},y:{ticks:{color:C.text3},grid:{color:C.border}}}}});
+  const labels = ERA.map(e => e.label);
+  if (charts.trendDiff) charts.trendDiff.destroy();
+  charts.trendDiff = new Chart(document.getElementById('trendDiff'), { type: 'line', data: { labels, datasets: [
+    { label: 'Avg PPG Drop', data: ERA.map(e => e.avg_diff), borderColor: C.red, backgroundColor: C.red + '22', fill: true, tension: 0.3, pointRadius: 2 },
+    { label: 'Avg Diff %', data: ERA.map(e => e.avg_diff_pct), borderColor: C.accent, borderDash: [5, 5], tension: 0.3, pointRadius: 2, yAxisID: 'pct' }
+  ] }, options: { responsive: true, interaction: { mode: 'index', intersect: false }, plugins: { legend: { labels: { color: C.text2 } } }, scales: {
+    x: { ticks: { color: C.text3, maxRotation: 45, maxTicksLimit: 20 }, grid: { color: C.border } },
+    y: { position: 'left', title: { display: true, text: 'PPG Drop', color: C.text3 }, ticks: { color: C.text3 }, grid: { color: C.border } },
+    pct: { position: 'right', title: { display: true, text: 'Diff %', color: C.text3 }, ticks: { color: C.text3 }, grid: { display: false } }
+  } } });
+  if (charts.trend3) charts.trend3.destroy();
+  charts.trend3 = new Chart(document.getElementById('trend3pm'), { type: 'line', data: { labels, datasets: [{ label: 'Avg 3PM/G', data: ERA.map(e => e.avg_3pm), borderColor: C.accent, backgroundColor: C.accent + '22', fill: true, tension: 0.3, pointRadius: 2 }] },
+    options: { responsive: true, plugins: { legend: { labels: { color: C.text2 } } }, scales: { x: { ticks: { color: C.text3, maxRotation: 45, maxTicksLimit: 15 }, grid: { color: C.border } }, y: { ticks: { color: C.text3 }, grid: { color: C.border } } } } });
+  if (charts.trendFt) charts.trendFt.destroy();
+  charts.trendFt = new Chart(document.getElementById('trendFtm'), { type: 'line', data: { labels, datasets: [{ label: 'Avg FTM/G', data: ERA.map(e => e.avg_ftm), borderColor: C.purple, backgroundColor: C.purple + '22', fill: true, tension: 0.3, pointRadius: 2 }] },
+    options: { responsive: true, plugins: { legend: { labels: { color: C.text2 } } }, scales: { x: { ticks: { color: C.text3, maxRotation: 45, maxTicksLimit: 15 }, grid: { color: C.border } }, y: { ticks: { color: C.text3 }, grid: { color: C.border } } } } });
 }
 
 // ========== RENDER ==========
 function render() {
-  const data=getFiltered();
+  const data = getFiltered();
   renderCallouts(data);
   renderTableAndFunnel(data);
 }
 
 // ========== EVENTS ==========
-sel.addEventListener('change',e=>{state.season=parseInt(e.target.value);state.page=0;render();});
-document.getElementById('minPPG').addEventListener('input',e=>{state.minPPG=parseInt(e.target.value);document.getElementById('minPPGVal').textContent=e.target.value;state.page=0;render();});
-document.getElementById('minGP').addEventListener('input',e=>{state.minGP=parseInt(e.target.value);document.getElementById('minGPVal').textContent=e.target.value;state.page=0;render();});
-document.getElementById('minMPG').addEventListener('input',e=>{state.minMPG=parseInt(e.target.value);document.getElementById('minMPGVal').textContent=e.target.value;state.page=0;render();});
+sel.addEventListener('change', e => {
+  state.season = e.target.value === 'all' ? 'all' : parseInt(e.target.value);
+  state.page = 0;
+  render();
+});
+document.getElementById('minPPG').addEventListener('input', e => { state.minPPG = parseInt(e.target.value); document.getElementById('minPPGVal').textContent = e.target.value; state.page = 0; render(); });
+document.getElementById('minGP').addEventListener('input', e => { state.minGP = parseInt(e.target.value); document.getElementById('minGPVal').textContent = e.target.value; state.page = 0; render(); });
+document.getElementById('minMPG').addEventListener('input', e => { state.minMPG = parseInt(e.target.value); document.getElementById('minMPGVal').textContent = e.target.value; state.page = 0; render(); });
 
-document.querySelectorAll('.tab').forEach(tab=>{
-  tab.addEventListener('click',()=>{
-    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     tab.classList.add('active');
-    state.tab=tab.dataset.tab;
-    document.querySelectorAll('[id^="tab-"]').forEach(el=>el.classList.add('hidden'));
-    document.getElementById('tab-'+state.tab).classList.remove('hidden');
-    if(state.tab==='charts') renderCharts(getFiltered());
-    if(state.tab==='trends') renderTrends();
+    state.tab = tab.dataset.tab;
+    document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
+    document.getElementById('tab-' + state.tab).classList.remove('hidden');
+    if (state.tab === 'charts') renderCharts(getFiltered());
+    if (state.tab === 'trends') renderTrends();
   });
 });
 
-document.querySelectorAll('.table-side thead th').forEach(th=>{
-  th.addEventListener('click',()=>{
-    const col=th.dataset.col;
-    if(state.sortCol===col) state.sortDir=state.sortDir==='asc'?'desc':'asc';
-    else{state.sortCol=col;state.sortDir='asc';}
-    document.querySelectorAll('.table-side thead th').forEach(t=>t.classList.remove('sorted'));
+document.querySelectorAll('.table-side thead th').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.col;
+    if (state.sortCol === col) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+    else { state.sortCol = col; state.sortDir = (col === 'n' || col === 't' || col === 'sl') ? 'asc' : 'desc'; }
+    document.querySelectorAll('.table-side thead th').forEach(t => t.classList.remove('sorted'));
     th.classList.add('sorted');
-    state.page=0;
+    state.page = 0;
     renderTableAndFunnel(getFiltered());
   });
 });
 
-document.getElementById('prevPage').addEventListener('click',()=>{state.page--;renderTableAndFunnel(getFiltered());});
-document.getElementById('nextPage').addEventListener('click',()=>{state.page++;renderTableAndFunnel(getFiltered());});
+document.getElementById('prevPage').addEventListener('click', () => { state.page--; renderTableAndFunnel(getFiltered()); });
+document.getElementById('nextPage').addEventListener('click', () => { state.page++; renderTableAndFunnel(getFiltered()); });
 
-// Handle resize
-window.addEventListener('resize', () => { if(currentPageData.length) renderFunnel(currentPageData); });
+window.addEventListener('resize', () => { if (currentPageData.length) renderFunnel(currentPageData); });
 
 render();
 </script>
