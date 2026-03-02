@@ -610,6 +610,42 @@
     }
     .min-gp-input:focus { border-color: var(--std); box-shadow: 0 0 0 2px var(--std-lt); }
 
+    /* Histogram filter chip */
+    .hist-filter-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 6px 3px 10px;
+      border-radius: 6px;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 500;
+      background: var(--std-lt);
+      color: var(--std);
+      border: 1px solid var(--std-border);
+      animation: fadeUp 0.2s ease;
+    }
+    .hist-filter-chip-x {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      border: none;
+      background: transparent;
+      color: var(--std);
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      line-height: 1;
+      transition: background var(--ease);
+    }
+    .hist-filter-chip-x:hover {
+      background: var(--std);
+      color: #fff;
+    }
+
     /* Loading state */
     .loading-overlay {
       display: flex;
@@ -786,6 +822,7 @@
         </div>
         <div class="filter-divider"></div>
         <span class="phase-badge badge-done">✓ Phase 2 Live</span>
+        <span id="hist-chip-slot"></span>
       </div>
       <div id="table-container">
         <div class="loading-overlay" id="loading-state">
@@ -831,8 +868,15 @@
           </div>
           <span class="phase-badge badge-done">✓ Live</span>
         </div>
-        <div class="card-body" style="padding:1.1rem 1.1rem 0.6rem;">
-          <canvas id="histogram-canvas" width="520" height="300" style="width:100%;height:300px;display:block;"></canvas>
+        <div class="card-body" style="padding:1.1rem 1.1rem 0.6rem;position:relative;">
+          <canvas id="histogram-canvas" width="520" height="300" style="width:100%;height:300px;display:block;cursor:crosshair;"></canvas>
+          <div id="histogram-tooltip" style="
+            display:none;position:absolute;pointer-events:none;z-index:50;
+            background:#181714;color:#fff;border-radius:8px;padding:0.55rem 0.75rem;
+            box-shadow:0 4px 16px rgba(0,0,0,0.18);
+            font-family:var(--font-body);font-size:0.74rem;line-height:1.5;
+            white-space:nowrap;transition:opacity 0.12s ease;
+          "></div>
           <div style="display:flex;align-items:center;justify-content:space-between;padding:0.45rem 0 0.1rem;">
             <div style="display:flex;align-items:center;gap:0.6rem;">
               <div style="display:flex;align-items:center;gap:4px;font-size:0.65rem;color:var(--text-3);">
@@ -3647,12 +3691,18 @@ function applyFilters() {
     if (season && r.season_label !== season) return false;
     if (team && r.team !== team) return false;
     if (search && !r.name.toLowerCase().includes(search) && !r.team.toLowerCase().includes(search)) return false;
+    // Histogram bucket filter
+    if (HIST_SELECTED >= 0 && HIST_BARS[HIST_SELECTED]) {
+      const bar = HIST_BARS[HIST_SELECTED];
+      if (r.delta < bar.key || r.delta >= bar.binEnd) return false;
+    }
     return true;
   });
 
   sortData();
   PAGE = 0;
   renderTable();
+  renderHistogramChip();
 }
 
 function sortData() {
@@ -3848,6 +3898,10 @@ function debounce(fn, ms) {
 }
 
 // ── Histogram ──
+let HIST_BARS = [];   // stored bar rects for hit-testing
+let HIST_STATE = {};  // stored scales/params for redraw on hover
+let HIST_SELECTED = -1; // index of clicked/selected bar (-1 = none)
+
 function renderHistogram() {
   const canvas = document.getElementById('histogram-canvas');
   if (!canvas || RAW_DATA.length === 0) return;
@@ -3892,7 +3946,39 @@ function renderHistogram() {
   const xScale = v => pad.left + ((v - xMin) / (xMax - xMin)) * plotW;
   const yScale = v => pad.top + plotH - (v / maxCount) * plotH;
 
-  // Clear
+  // Store state for hover redraws
+  HIST_STATE = { W, H, pad, plotW, plotH, xMin, xMax, xScale, yScale, maxCount, mean, median, bins, sortedKeys, binW, deltas };
+
+  drawHistogramFrame(ctx, -1);
+
+  // Stats
+  const statsEl = document.getElementById('histogram-stats');
+  if (statsEl) {
+    statsEl.textContent = `n=${deltas.length.toLocaleString()} · μ=${mean.toFixed(2)} · med=${median.toFixed(2)}`;
+  }
+}
+
+function getBarFill(key, hovered) {
+  let base;
+  if (key >= 0) {
+    base = hovered ? 'rgba(154,151,143,0.55)' : 'rgba(154,151,143,0.35)';
+  } else if (key >= -0.5) {
+    base = hovered ? 'rgba(192,57,43,0.50)' : 'rgba(192,57,43,0.3)';
+  } else if (key >= -1.0) {
+    base = hovered ? 'rgba(192,57,43,0.65)' : 'rgba(192,57,43,0.45)';
+  } else if (key >= -1.5) {
+    base = hovered ? 'rgba(192,57,43,0.78)' : 'rgba(192,57,43,0.6)';
+  } else if (key >= -2.0) {
+    base = hovered ? 'rgba(192,57,43,0.88)' : 'rgba(192,57,43,0.72)';
+  } else {
+    base = hovered ? 'rgba(192,57,43,1.0)' : 'rgba(192,57,43,0.85)';
+  }
+  return base;
+}
+
+function drawHistogramFrame(ctx, hoveredIdx) {
+  const { W, H, pad, plotW, plotH, xScale, yScale, maxCount, mean, median, sortedKeys, bins, binW } = HIST_STATE;
+
   ctx.clearRect(0, 0, W, H);
 
   // Grid lines
@@ -3909,28 +3995,26 @@ function renderHistogram() {
     ctx.stroke();
   }
 
-  // Draw bars
+  // Draw bars & build hit-test array
   const barPad = 1;
-  sortedKeys.forEach(key => {
+  const hasActive = hoveredIdx >= 0 || HIST_SELECTED >= 0;
+  HIST_BARS = [];
+  sortedKeys.forEach((key, idx) => {
     const count = bins[key];
     const x = xScale(key) + barPad;
     const w = Math.max(1, xScale(key + binW) - xScale(key) - barPad * 2);
     const y = yScale(count);
     const h = yScale(0) - y;
+    const isHovered = idx === hoveredIdx;
+    const isSelected = idx === HIST_SELECTED;
+    const isHighlighted = isHovered || isSelected;
 
-    if (key >= 0) {
-      ctx.fillStyle = 'rgba(154,151,143,0.35)'; // neutral for zero/positive
-    } else if (key >= -0.5) {
-      ctx.fillStyle = 'rgba(192,57,43,0.3)';
-    } else if (key >= -1.0) {
-      ctx.fillStyle = 'rgba(192,57,43,0.45)';
-    } else if (key >= -1.5) {
-      ctx.fillStyle = 'rgba(192,57,43,0.6)';
-    } else if (key >= -2.0) {
-      ctx.fillStyle = 'rgba(192,57,43,0.72)';
-    } else {
-      ctx.fillStyle = 'rgba(192,57,43,0.85)';
+    // Dim non-active bars when something is hovered or selected
+    if (hasActive && !isHighlighted) {
+      ctx.globalAlpha = 0.3;
     }
+
+    ctx.fillStyle = getBarFill(key, isHighlighted);
 
     // Rounded top corners
     const r = 2;
@@ -3944,6 +4028,23 @@ function renderHistogram() {
     ctx.quadraticCurveTo(x, y, x + r, y);
     ctx.closePath();
     ctx.fill();
+
+    // Selected bar: thicker accent border
+    if (isSelected) {
+      ctx.strokeStyle = '#2B4B9F';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    } else if (isHovered) {
+      ctx.strokeStyle = '#181714';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1;
+
+    HIST_BARS.push({ x, y, w, h, key, count, binEnd: Math.round((key + binW) * 100) / 100 });
   });
 
   // Mean line
@@ -3980,15 +4081,17 @@ function renderHistogram() {
   ctx.fillText(`med ${median.toFixed(2)}`, medX - 5, pad.top + 12);
 
   // X axis labels
+  const xMin = HIST_STATE.xMin;
+  const xMax = HIST_STATE.xMax;
   ctx.fillStyle = '#9A978F';
   ctx.font = `400 ${10}px 'JetBrains Mono', monospace`;
   ctx.textAlign = 'center';
   for (let v = Math.ceil(xMin); v <= Math.floor(xMax); v += 1) {
     const x = xScale(v);
     ctx.fillText(v.toFixed(0), x, pad.top + plotH + 16);
-    // Tick
     ctx.strokeStyle = '#E6E3DC';
     ctx.lineWidth = 1;
+    ctx.setLineDash([]);
     ctx.beginPath();
     ctx.moveTo(x, pad.top + plotH);
     ctx.lineTo(x, pad.top + plotH + 4);
@@ -4020,18 +4123,166 @@ function renderHistogram() {
   ctx.fillStyle = '#9A978F';
   ctx.fillText('Player-seasons', 0, 0);
   ctx.restore();
+}
 
-  // Stats
-  const statsEl = document.getElementById('histogram-stats');
-  if (statsEl) {
-    statsEl.textContent = `n=${deltas.length.toLocaleString()} · μ=${mean.toFixed(2)} · med=${median.toFixed(2)}`;
+// ── Histogram hover ──
+(function initHistogramHover() {
+  let currentIdx = -1;
+
+  const canvas = document.getElementById('histogram-canvas');
+  const tooltip = document.getElementById('histogram-tooltip');
+  if (!canvas || !tooltip) return;
+
+  canvas.addEventListener('mousemove', e => {
+    if (HIST_BARS.length === 0) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    let hitIdx = -1;
+    for (let i = 0; i < HIST_BARS.length; i++) {
+      const b = HIST_BARS[i];
+      if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+        hitIdx = i;
+        break;
+      }
+    }
+
+    if (hitIdx !== currentIdx) {
+      currentIdx = hitIdx;
+      const dpr = window.devicePixelRatio || 1;
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawHistogramFrame(ctx, hitIdx);
+
+      if (hitIdx >= 0) {
+        const bar = HIST_BARS[hitIdx];
+        const pct = ((bar.count / HIST_STATE.deltas.length) * 100).toFixed(1);
+        tooltip.innerHTML =
+          `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">` +
+            `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${bar.key >= 0 ? 'rgba(154,151,143,0.6)' : 'rgba(192,57,43,0.85)'};"></span>` +
+            `<span style="font-family:var(--font-mono);font-size:0.68rem;font-weight:600;color:rgba(255,255,255,0.55);">BUCKET</span>` +
+          `</div>` +
+          `<div style="font-family:var(--font-mono);font-size:0.82rem;font-weight:600;letter-spacing:-0.01em;">${bar.key.toFixed(2)} to ${bar.binEnd.toFixed(2)} PPG</div>` +
+          `<div style="margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.12);display:flex;align-items:baseline;gap:6px;">` +
+            `<span style="font-family:var(--font-display);font-size:1.05rem;font-weight:700;">${bar.count.toLocaleString()}</span>` +
+            `<span style="font-size:0.68rem;color:rgba(255,255,255,0.5);">player-seasons</span>` +
+            `<span style="font-family:var(--font-mono);font-size:0.65rem;color:rgba(255,255,255,0.4);margin-left:auto;">${pct}%</span>` +
+          `</div>`;
+        tooltip.style.display = 'block';
+
+        // Position tooltip above the bar, centered
+        const cardBody = canvas.parentElement;
+        const cardRect = cardBody.getBoundingClientRect();
+        let tx = (bar.x + bar.w / 2) - tooltip.offsetWidth / 2;
+        let ty = bar.y - tooltip.offsetHeight - 10;
+
+        // Clamp within card bounds
+        tx = Math.max(4, Math.min(tx, cardRect.width - tooltip.offsetWidth - 4));
+        if (ty < 0) ty = bar.y + bar.h + 8;
+
+        tooltip.style.left = tx + 'px';
+        tooltip.style.top = ty + 'px';
+      } else {
+        tooltip.style.display = 'none';
+      }
+    }
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    if (currentIdx !== -1) {
+      currentIdx = -1;
+      const dpr = window.devicePixelRatio || 1;
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawHistogramFrame(ctx, -1);
+      tooltip.style.display = 'none';
+    }
+  });
+
+  // ── Click to filter table ──
+  canvas.addEventListener('click', e => {
+    if (HIST_BARS.length === 0) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    let hitIdx = -1;
+    for (let i = 0; i < HIST_BARS.length; i++) {
+      const b = HIST_BARS[i];
+      if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+        hitIdx = i;
+        break;
+      }
+    }
+
+    // Toggle: click same bar again to deselect
+    if (hitIdx === HIST_SELECTED) {
+      HIST_SELECTED = -1;
+    } else {
+      HIST_SELECTED = hitIdx;
+    }
+
+    // Redraw histogram with selection state
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawHistogramFrame(ctx, hitIdx);
+
+    // Re-filter and scroll to table
+    applyFilters();
+
+    if (HIST_SELECTED >= 0) {
+      document.getElementById('table-container').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  });
+})();
+
+// ── Histogram filter chip in filter bar ──
+function renderHistogramChip() {
+  const slot = document.getElementById('hist-chip-slot');
+  if (!slot) return;
+
+  if (HIST_SELECTED < 0 || !HIST_BARS[HIST_SELECTED]) {
+    slot.innerHTML = '';
+    return;
+  }
+
+  const bar = HIST_BARS[HIST_SELECTED];
+  slot.innerHTML =
+    `<div class="filter-divider"></div>` +
+    `<span class="hist-filter-chip">` +
+      `<span style="font-size:0.6rem;opacity:0.6;">Δ PPG</span> ` +
+      `${bar.key.toFixed(2)} to ${bar.binEnd.toFixed(2)}` +
+      `<button class="hist-filter-chip-x" onclick="clearHistogramFilter()" title="Clear histogram filter">×</button>` +
+    `</span>`;
+}
+
+function clearHistogramFilter() {
+  HIST_SELECTED = -1;
+  applyFilters();
+
+  // Redraw histogram without selection
+  const canvas = document.getElementById('histogram-canvas');
+  if (canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawHistogramFrame(ctx, -1);
   }
 }
 
 // Resize handler for histogram
 window.addEventListener('resize', (() => {
   let t;
-  return () => { clearTimeout(t); t = setTimeout(renderHistogram, 150); };
+  return () => { clearTimeout(t); t = setTimeout(() => {
+    HIST_SELECTED = -1;
+    renderHistogram();
+    renderHistogramChip();
+    applyFilters();
+  }, 150); };
 })());
 
 // ── Boot ──
